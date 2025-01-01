@@ -1,47 +1,9 @@
-/* RawParser -- A 'raw' parser         Copyright (C) 2021 Frans Faase
+/* tcposc -- A compiler for TinyCoPoOS   Copyright (C) 2024 Frans Faase
 
-   This shows how to implement a grammar driven, scannerless parser in C
-   in a number of incremental steps going from simple to complex.
-
-   Grammar driven means that this is not a compiler that reads a grammar
-   and either generates code (implementing the parser) or a set of tables
-   to drive a parsing algorithm. (An example of the latter is yacc/bison.)
-   Instead the parsing algorithm directly operates on the grammar
-   specification, which allows to implement a rich grammar with optional,
-   sequential and grouping, of grammar elements. This specification is
-   represented by structs that point to each other. The construction of
-   the grammar is aided by some clever defines to increase readability.
-
-   It being scannerless means that the parser operates on a single unified
-   grammar description for both the scanning and parsing aspects. In this
-   grammar description, function pointers are used to define actions to
-   be taken during parsing to construct the resuling abstract syntax tree.
+   This is pased on https://github.com/FransFaase/IParse
    
-   The code has been structured to make it more accessible. For this
-   purpose narrative comments have been added and examples of usage are
-   given.
-   
-   
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
-GNU General Public License:
-   http://www.iwriteiam.nl/GNU.txt
-
 */
 
-#define VERSION "0.1 of January 2021."
 
 /* 
 	First some standard includes and definitions.
@@ -51,6 +13,7 @@ GNU General Public License:
 #include <stdlib.h>
 #include <malloc.h>
 #include <string.h>
+#include <stdarg.h>
 
 #ifndef NULL
 #define NULL 0
@@ -845,7 +808,7 @@ void *check_type(const char *type_name, void *value, int line)
 	const char *value_type_name = ((ref_counted_base_p)value)->type_name;
 	if (strcmp(value_type_name, type_name) != 0)
 	{
-		printf("line %d Error: castring %s to %s\n", line, ((ref_counted_base_p)value)->type_name, type_name); fflush(stdout);
+		printf("line %d Error: casting %s to %s\n", line, ((ref_counted_base_p)value)->type_name, type_name); fflush(stdout);
 		exit(1);
 		return NULL;
 	}
@@ -2014,6 +1977,16 @@ tree_p malloc_tree(tree_param_p tree_param)
 	return new_tree;
 }
 
+bool tree_is(tree_p tree, const char *name)
+{
+	return tree != NULL && tree->tree_param != NULL && tree->tree_param->name != NULL && strcmp(tree->tree_param->name, name) == 0;
+}
+
+result_p tree_child(tree_p tree, int nr)
+{
+	return tree != NULL && nr <= tree->nr_children ? &tree->children[nr-1] : NULL;
+}
+
 typedef struct prev_child_t *prev_child_p;
 struct prev_child_t
 {
@@ -2171,7 +2144,7 @@ struct hexa_hash_tree_t
 
 byte *keyword_state = NULL;
 
-char *ident_string(char *s)
+char *ident_string(const char *s)
 /*  Returns a unique address representing the string. the global
     keyword_state will point to the integer value in the range [0..254].
 	If the string does not occure in the store, it is added and the state
@@ -2180,7 +2153,7 @@ char *ident_string(char *s)
 {
 	static hexa_hash_tree_p hash_tree = NULL;
 	hexa_hash_tree_p *r_node = &hash_tree;
-	char *vs = s;
+	const char *vs = s;
 	int depth;
 	int mode = 0;
 
@@ -2292,7 +2265,7 @@ typedef struct ident_t *ident_p;
 struct ident_t
 {
 	tree_node_t _node;
-	const char *name;
+	char *name;
 	bool is_keyword;
 };
 
@@ -2320,6 +2293,20 @@ bool create_ident_tree(const result_p rule_result, void* data, result_p result)
 	SET_TYPE("ident_p", ident);
 	return TRUE;
 }
+
+char *ident_name(result_p result)
+{
+	if (result == 0)
+		return "<result_p is NULL>";
+	if (result->data == 0)
+		return "result_p->data is NULL>";
+	tree_node_p tree_node = CAST(tree_node_p, result->data);
+	if (tree_node->type_name != ident_node_type)
+		return "<result_p not ident>";
+	ident_p ident = CAST(ident_p, tree_node);
+	return ident->name;
+}
+		
 
 /*  Ident grammar  */
 
@@ -2476,7 +2463,7 @@ const char *char_node_type = "char_node_type";
 
 void char_node_print(void *data, ostream_p ostream)
 {
-	ostream_puts(ostream, "char '");
+	ostream_puts(ostream, "'");
 	print_single_char(((char_node_p)data)->ch, '\'', ostream);
 	ostream_puts(ostream, "'");
 }
@@ -2702,7 +2689,7 @@ const char *string_node_type = "string_node_type";
 void string_node_print(void *data, ostream_p ostream)
 {
 	string_node_p string_node = CAST(string_node_p, data);
-	ostream_puts(ostream, "string \"");
+	ostream_puts(ostream, "\"");
 	for (size_t i = 0; i < string_node->length - 1; i++)
 		print_single_char(string_node->str[i], '"', ostream);
 	ostream_puts(ostream, "\"");
@@ -3091,6 +3078,8 @@ bool add_seq_as_list(result_p prev, result_p seq, void *data, result_p result)
 #define WS NTF("white_space", 0)
 #define PASS rules->end_function = pass_tree;
 #define TREE(N,F) rules->end_function = make_tree; { static tree_param_t tp = { N, F }; rules->end_function_data = &tp; }
+#define TREE_PARAM(N,F) tree_param_t N##_tp = { #N, F };
+#define TREE_TP(N) rules->end_function = make_tree; rules->end_function_data = &TP##_tp;
 #define KEYWORD(K) NTF("ident", 0) element->condition = equal_string; element->condition_argument = ident_string(K); *keyword_state = 1; WS
 #define OPTN OPT(0)
 #define IDENT NTF("ident", add_child) element->condition = not_a_keyword; WS
@@ -3098,6 +3087,11 @@ bool add_seq_as_list(result_p prev, result_p seq, void *data, result_p result)
 #define SEQL(F) { static tree_param_t tp = { list_type, F }; SEQ(0, add_seq_as_list, &tp) }
 #define REC_RULEC REC_RULE(rec_add_child);
 #define CHAR_WS(C) CHAR(C) WS
+
+TREE_PARAM(declaration, "")
+TREE_PARAM(list, "")
+TREE_PARAM(vardecl, "")
+TREE_PARAM(decl_init, "")
 
 void c_grammar(non_terminal_dict_p *all_nt)
 {
@@ -3235,6 +3229,20 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE
 		{ GROUPING
 			RULE NT("storage_class_specifier") PASS
+			RULE NT("simple_type_specifier") PASS
+		} SEQL("") OPTN ADD_CHILD AVOID
+		{ GROUPING
+			RULE
+			{ GROUPING
+				RULE NT("declarator")
+				{ GROUPING
+					RULE WS CHAR_WS('=') NT("initializer") TREE("init", " = %*")
+				} OPTN ADD_CHILD TREE("decl_init","%*%*")
+			} SEQL("") ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE("vardecl","%*;\n")
+		} ADD_CHILD TREE("declaration", "%*%*")
+		RULE
+		{ GROUPING
+			RULE NT("storage_class_specifier") PASS
 			RULE NT("type_specifier") PASS
 		} SEQL("") OPTN ADD_CHILD AVOID
 		{ GROUPING
@@ -3282,6 +3290,20 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE KEYWORD("auto") TREE("auto","auto")
 		RULE KEYWORD("task") TREE("task","task")
 		RULE KEYWORD("register") TREE("register","register")
+
+	NT_DEF("simple_type_specifier")
+		RULE KEYWORD("char") TREE("char","char")
+		RULE KEYWORD("short") TREE("short","short")
+		RULE KEYWORD("int") TREE("int","int")
+		RULE KEYWORD("long") TREE("long","long")
+		RULE KEYWORD("signed") TREE("signed","signed")
+		RULE KEYWORD("unsigned") TREE("unsigned","unsigned")
+		RULE KEYWORD("float") TREE("float","float")
+		RULE KEYWORD("double") TREE("double","double")
+		RULE KEYWORD("const") TREE("const","const")
+		RULE KEYWORD("volatile") TREE("volatile","volatile")
+		RULE KEYWORD("void") TREE("void","void")
+		RULE IDENT PASS
 
 	NT_DEF("type_specifier")
 		RULE KEYWORD("char") TREE("char","char")
@@ -3817,6 +3839,252 @@ void unparse(result_p result, ostream_p ostream)
 }
 
 
+
+// ----------------------------------------------------------------------------------------
+
+
+
+char *strprintf(const char *fmt, ...)
+{
+	va_list arg_ptr;
+	va_start(arg_ptr, fmt);
+	static char buffer[1000];
+	vsnprintf(buffer, 999, fmt, arg_ptr);
+	va_end(arg_ptr);
+	buffer[999] = '\0';
+	char *str = (char *)malloc(strlen(buffer) + 1);
+	strcpy(str, buffer);
+	return str;
+}
+
+typedef struct tree_list *tree_list_p;
+struct tree_list
+{
+	tree_p tree;
+	tree_list_p next;
+};
+
+tree_list_p new_result_list(tree_p tree)
+{
+	tree_list_p tree_list = MALLOC(struct tree_list);
+	tree_list->tree = tree;
+	tree_list->next = NULL;
+	return tree_list;
+}
+
+typedef struct tree_iterator tree_iterator_t, *tree_iterator_p;
+struct tree_iterator
+{
+	const char *name;
+	int nr_children;
+	result_t *children;
+};
+
+tree_p tree_of_result(result_p result)
+{
+	if (result != NULL && result->data != NULL)
+	{
+		tree_node_p tree_node = (tree_node_p)result->data;
+		if (tree_node->type_name == tree_node_type)
+			return CAST(tree_p, tree_node);
+	}
+	return NULL;
+}
+
+tree_p tree_child_tree(tree_p tree, int nr) { return tree_of_result(tree_child(tree, nr)); }
+
+tree_p list_of_result(result_p result)
+{
+	if (result != NULL && result->data != NULL)
+	{
+		tree_node_p tree_node = (tree_node_p)result->data;
+		if (tree_node->type_name == tree_node_type)
+		{
+			tree_p tree = CAST(tree_p, tree_node);
+			return tree->tree_param->name == list_type ? tree : NULL;
+		}
+	}
+	return NULL;
+}
+
+tree_p tree_child_list(tree_p tree, int nr) { return list_of_result(tree_child(tree, nr)); }
+
+void tree_iterator_init(tree_iterator_p tree_iterator, result_p result)
+{
+	tree_iterator->name = "";
+	tree_iterator->nr_children = 0;
+	tree_p tree = tree_of_result(result);
+	if (tree != NULL)
+	{
+		tree_iterator->name = tree->tree_param->name;
+		tree_iterator->nr_children = tree->nr_children;
+		tree_iterator->children = tree->children;
+	}
+}
+#define TREE_ITERATOR(N,R) tree_iterator_t N; tree_iterator_init(&N, R)
+#define ITERATOR_TREE(C,I,N) tree_p C = tree_of_result(&I.children[N]);
+
+const char *tree_name(result_p result)
+{
+	if (result == 0)
+		return "<result_p is NULL>";
+	if (result->data == 0)
+		return "<result_p->data is NULL>";
+	tree_node_p tree_node = CAST(tree_node_p, result->data);
+	if (tree_node->type_name == ident_node_type)
+		return CAST(ident_p, tree_node)->name;
+	if (tree_node->type_name == tree_node_type)
+	{
+		tree_p tree = CAST(tree_p, tree_node);
+		if (tree->tree_param == NULL || tree->tree_param->name == NULL)
+			return "<result->data->tree_param == NULL>";
+		return tree->tree_param->name;
+	}
+	return "<result_p->data has no name>";
+}
+
+void tree_node_print(void *data, ostream_p ostream)
+{
+	tree_node_p tree = CAST(tree_node_p, data);
+	if (tree->type_name == ident_node_type)
+		ident_print(data, ostream);
+	else if (tree->type_name == char_node_type)
+		char_node_print(data, ostream);
+	else if (tree->type_name == string_node_type)
+		string_node_print(data, ostream);
+	else if (tree->type_name == int_node_type)
+		int_node_print(data, ostream);
+}
+
+tree_node_p make_tree_for(tree_param_p tree_param, int nr, ...)
+{
+	tree_p tree = malloc_tree(tree_param);
+	tree->nr_children = nr;
+	va_list args;
+	va_start(args, nr);
+	tree->children = MALLOC_N(nr, result_t);
+	for (int i = 0; i < nr; i++)
+	{
+		RESULT_INIT(&tree->children[i]);
+		tree_node_p tree_node = va_arg(args, tree_node_p);
+		if (tree_node != NULL)
+			result_assign_ref_counted(&tree->children[i], tree_node, tree_node_print);
+	}
+	va_end(args);
+	return &tree->_node;
+}
+
+tree_node_p make_tree_node_ident(const char *name)
+{
+	ident_p ident = MALLOC(struct ident_t);
+	init_tree_node(&ident->_node, ident_node_type, NULL);
+	ident->name = ident_string(name);
+	return &ident->_node;
+}
+
+
+
+typedef struct var_context *var_context_p;
+struct var_context
+{
+	char *name;
+	char *global_name;
+	var_context_p prev;
+};
+
+var_context_p new_var_context(char *name, char *global_name, var_context_p prev)
+{
+	var_context_p var_context = MALLOC(struct var_context);
+	var_context->name = name;
+	var_context->global_name = global_name;
+	var_context->prev = prev;
+	return var_context;
+}
+
+char *var_context_global_name(var_context_p var_context, char *name)
+{
+	for (; var_context != 0; var_context = var_context->prev)
+		if (strcmp(var_context->name, name) == 0)	
+			return var_context->global_name;
+	return name;
+}
+
+tree_list_p new_global_vars = NULL;
+tree_list_p *ref_new_global_var = &new_global_vars;
+
+void pass1_expr(tree_node_p node, var_context_p var_context)
+{
+	if (node == NULL)
+		return;
+		
+	if (node->type_name == ident_node_type)
+	{
+		ident_p ident = CAST(ident_p, node);
+		ident->name = var_context_global_name(var_context, ident->name);
+	}
+	else if (node->type_name == tree_node_type)
+	{
+		tree_p tree = CAST(tree_p, node);
+		for (int i = 0; i < tree->nr_children; i++)
+			pass1_expr(CAST(tree_node_p, tree->children[i].data), var_context);
+	}
+}
+
+void pass1_statement(tree_p statement)
+{
+}
+
+
+void compile(result_p result, ostream_p ostream)
+{
+	//result_list_p tasks = NULL;
+	//result_list_p *ref_next_task = &tasks;
+
+	TREE_ITERATOR(decls, result);
+	for (int i = 0; i < decls.nr_children; i++)
+	{
+		ITERATOR_TREE(decl, decls, i);
+		if (tree_is(decl, "declaration"))
+		{
+			printf("\n");
+			tree_p types = tree_child_list(decl, 1);
+			bool is_task = types != 0 && tree_is(tree_child_tree(types, 1), "task");
+			if (is_task)
+			{
+				char *task_name = ident_name(tree_child(tree_child_tree(decl, 2), 1));
+				const char *result_type = tree_name(tree_child(types, 2));
+				printf("task %s %s\n", task_name, result_type);
+				if (strcmp(result_type, "void") != 0)
+				{
+					// Add global var
+					/*
+					tree_node_p declaration 
+						= make_tree_for(&declaration_tp, 2,
+							make_tree_for(&list_tp, 1, result_type),
+							make_tree_for(&vardecl_tp, 1,
+								make_tree_for(&list_tp, 1,
+									make_tree_for(&decl_init_tp, 2,
+										make_tree_node_ident(strprintf("%s_result", task_name)),
+										NULL))));
+					*ref_new_global_var = new_result_list((tree_p)declaration);
+					ref_new_global_var = &(*ref_new_global_var)->next;
+					*/
+				}
+				result_print(&decls.children[i], ostream);
+			}
+			else
+			{
+				if (tree_is(tree_child_tree(decl, 2), "vardecl"))
+					printf("global variable ");
+				result_print(&decls.children[i], ostream);
+			}
+			printf("\n");
+		}
+		else
+			printf("other\n");
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc != 2)
@@ -3864,8 +4132,9 @@ int main(int argc, char *argv[])
 		{
 			file_ostream_t out_ostream;
 			file_ostream_init(&out_ostream, stdout);
-			result_print(&result, &out_ostream.ostream);
-			unparse(&result, &out_ostream.ostream);
+			//result_print(&result, &out_ostream.ostream);
+			//printf("\n");
+			compile(&result, &out_ostream.ostream);
 		}
 	}
 	else

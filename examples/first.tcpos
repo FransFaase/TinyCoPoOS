@@ -1,0 +1,57 @@
+char test;
+uint32_t temp = 0;
+err_t temp_err = ERR_OK;
+
+task int get_temp(void)
+{
+    queue for I2CExec {
+       I2COpen(TEMP_DEVICE_ADDR);
+       I2CStartWrite();
+       I2CWrite(TEMP_DEVICE_GET_TEMP_CMD);
+       I2CReadValues(2);
+       temp_err = I2CExec();
+       if (temp_err == ERR_OK) {
+            uint8_t x = I2CRead();
+            uint8_t y = I2CRead();
+            temp = (x << 8) | y;
+       }
+       else
+       {
+       }
+    }
+}
+task err_t I2CExec(void)
+{
+    I2CStop();
+    err_r err;
+    timer bus_err_timer;
+    poll {
+        if (I2CDone()) {
+            err = I2CError();
+            break;
+        }
+    } at most (2) {
+        err = ERR_TIMEOUT;
+    }
+    if (err == ERR_OK) {
+        TimerReset(bus_err_timer);
+    }
+    else {
+        I2CResetFSM();
+        TimerStart(bus_err_timer, 100);
+        if (TimerDone(bus_err_timer)) {
+            I2CBusreset();
+            poll {
+                if (!I2CBusBusy())
+                    break;
+            }
+        }
+    }
+    return err;
+}
+
+void run(void)
+{
+    every (10) start get_temp;
+}
+
