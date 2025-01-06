@@ -5,6 +5,8 @@
 */
 
 
+#define SAFE_CASTING
+
 /* 
 	First some standard includes and definitions.
 */
@@ -770,6 +772,15 @@ bool use_sequence_result(result_p prev, result_p seq, void *data, result_p resul
 
 bool debug_allocations = FALSE;
 
+#ifdef SAFE_CASTING
+typedef struct ref_counted_base_type ref_counted_base_type_t, *ref_counted_base_type_p;
+struct ref_counted_base_type
+{
+	const char* name;
+	ref_counted_base_type_p super;
+};
+#endif
+
 typedef struct
 {
 	unsigned long cnt;     /* A reference count */
@@ -780,7 +791,7 @@ typedef struct
 	   reference counts need to be decremented.
 	*/
 #ifdef SAFE_CASTING
-	const char* type_name;
+	ref_counted_base_type_p base_type;
 #endif
 	void (*release)(void *);
 } ref_counted_base_t, *ref_counted_base_p;
@@ -799,34 +810,34 @@ void ref_counted_base_dec(void *data)
 }
 
 #ifdef SAFE_CASTING
-#define SET_TYPE(T, X) ((ref_counted_base_p)X)->type_name = T;
-#define CAST(T,X) ((T)check_type(#T,X,__LINE__))
+#define DEFINE_BASE_TYPE(T) ref_counted_base_type_t T##_base_type = { #T, NULL };
+#define DEFINE_SUB_BASE_TYPE(T,S) ref_counted_base_type_t T##_base_type = { #T, &S##_base_type };
+#define SET_TYPE(T, X) ((ref_counted_base_p)X)->base_type = &T##_base_type;
+#define CAST(T,X) ((T)check_type(&T##_base_type,X,__LINE__))
 
-void *check_type(const char *type_name, void *value, int line)
+void *check_type(ref_counted_base_type_p base_type, void *value, int line)
 {
-	if (value == 0) return NULL;
-	const char *value_type_name = ((ref_counted_base_p)value)->type_name;
-	if (strcmp(value_type_name, type_name) != 0)
-	{
-		printf("line %d Error: casting %s to %s\n", line, ((ref_counted_base_p)value)->type_name, type_name); fflush(stdout);
-		exit(1);
+	if (value == 0)
 		return NULL;
-	}
-	return value;
+	for (ref_counted_base_type_p value_base_type = ((ref_counted_base_p)value)->base_type; value_base_type != 0; value_base_type = value_base_type->super)
+		if (value_base_type == base_type)
+			return value;
+	printf("line %d Error: casting %s to %s\n", line, ((ref_counted_base_p)value)->base_type->name, base_type->name); fflush(stdout);
+	exit(1);
+	return NULL;
 }
 #else
+#define DEFINE_BASE_TYPE(T,S)
+#define DEFINE_SUB_BASE_TYPE(T,S)
 #define SET_TYPE(T, X)
 #define CAST(T,X) ((T)(X))
 #endif
 
-void result_assign_ref_counted(result_p result, void *data, void (*print)(void *data, ostream_p ostream))
+void result_assign_ref_counted(result_p result, ref_counted_base_p ref_counted_base, void (*print)(void *data, ostream_p ostream))
 {
-	if (debug_allocations) fprintf(stdout, "Allocated %p\n", data);
-	((ref_counted_base_p)data)->cnt = 1;
-#ifdef SAFE_CASTING
-	((ref_counted_base_p)data)->type_name = "";
-#endif
-	result->data = data;
+	if (debug_allocations) fprintf(stdout, "Allocated %p\n", ref_counted_base);
+	ref_counted_base->cnt = 1;
+	result->data = ref_counted_base;
 	result->inc = ref_counted_base_inc;
 	result->dec = ref_counted_base_dec;
 	result->print = print;
@@ -848,6 +859,8 @@ typedef struct number_data
 
 #define NUMBER_DATA_NUM(R) (CAST(number_data_p,(R)->data)->num)
 
+DEFINE_BASE_TYPE(number_data_p)
+
 void number_print(void *data, ostream_p ostream)
 {
 	char buffer[41];
@@ -859,8 +872,8 @@ void new_number_data(result_p result)
 {
 	number_data_p number_data = MALLOC(struct number_data);
 	number_data->_base.release = 0;
-	result_assign_ref_counted(result, number_data, number_print);
-	SET_TYPE("number_data_p",number_data);
+	result_assign_ref_counted(result, &number_data->_base, number_print);
+	SET_TYPE(number_data_p, number_data);
 }
 
 
@@ -1902,21 +1915,23 @@ typedef struct
 	const char *type_name;
 	unsigned int line;
 	unsigned int column;
-} tree_node_t, *tree_node_p;
+} node_t, *node_p;
 
-void init_tree_node(tree_node_p tree_node, const char *type_name, void (*release_node)(void *))
+DEFINE_BASE_TYPE(node_p)
+
+void init_node(node_p node, const char *type_name, void (*release_node)(void *))
 {
-	tree_node->_base.cnt = 1;
-	tree_node->_base.release = release_node;
-	tree_node->type_name = type_name;
-	tree_node->line = 0;
-	tree_node->column = 0;
+	node->_base.cnt = 1;
+	node->_base.release = release_node;
+	node->type_name = type_name;
+	node->line = 0;
+	node->column = 0;
 }
 
-void tree_node_set_pos(tree_node_p tree_node, text_pos_p ps)
+void node_set_pos(node_p node, text_pos_p ps)
 {
-	tree_node->line = ps->cur_line;
-	tree_node->column = ps->cur_column;
+	node->line = ps->cur_line;
+	node->column = ps->cur_column;
 }
 
 typedef struct tree_param_t tree_param_t, *tree_param_p;
@@ -1929,20 +1944,22 @@ struct tree_param_t
 typedef struct tree_t *tree_p;
 struct tree_t
 {
-	tree_node_t _node;
+	node_t _node;
 	tree_param_p tree_param;
 	unsigned int nr_children;
 	result_t *children;
 };
 
-tree_p old_trees = NULL;
-long alloced_trees = 0L;
+DEFINE_SUB_BASE_TYPE(tree_p, node_p)
+
+tree_p old_tree_nodes = NULL;
+long nr_allocated_tree_nodes = 0L;
 
 void release_tree(void *data)
 {
 	tree_p tree = CAST(tree_p, data);
 
-	alloced_trees--;
+	nr_allocated_tree_nodes--;
 
 	if (tree->nr_children > 0)
 	{
@@ -1950,36 +1967,41 @@ void release_tree(void *data)
 			RESULT_RELEASE(&tree->children[i]);
 		FREE(tree->children);
 	}
-	*(tree_p*)tree = old_trees;
-	old_trees = tree;
+	*(tree_p*)tree = old_tree_nodes;
+	old_tree_nodes = tree;
 }
 
 const char *tree_node_type = "tree_node_type";
 
 tree_p malloc_tree(tree_param_p tree_param)
 {
-	tree_p new_tree;
+	tree_p new_tree_node;
 
-	if (old_trees)
-	{   new_tree = old_trees;
-		old_trees = *(tree_p*)old_trees;
+	if (old_tree_nodes)
+	{   new_tree_node = old_tree_nodes;
+		old_tree_nodes = *(tree_p*)old_tree_nodes;
 	}
 	else
-		new_tree = MALLOC(struct tree_t);
+		new_tree_node = MALLOC(struct tree_t);
 
-	init_tree_node(&new_tree->_node, tree_node_type, release_tree);
-	new_tree->tree_param = tree_param;
-	new_tree->nr_children = 0;
-	new_tree->children = NULL;
+	init_node(&new_tree_node->_node, tree_node_type, release_tree);
+	new_tree_node->tree_param = tree_param;
+	new_tree_node->nr_children = 0;
+	new_tree_node->children = NULL;
 	
-	alloced_trees++;
+	nr_allocated_tree_nodes++;
 
-	return new_tree;
+	return new_tree_node;
 }
 
 bool tree_is(tree_p tree, const char *name)
 {
 	return tree != NULL && tree->tree_param != NULL && tree->tree_param->name != NULL && strcmp(tree->tree_param->name, name) == 0;
+}
+
+bool node_is_tree(node_p node, const char *name)
+{
+	return node != NULL && node->type_name == tree_node_type && tree_is(CAST(tree_p, node), name);
 }
 
 result_p tree_child(tree_p tree, int nr)
@@ -1994,6 +2016,8 @@ struct prev_child_t
 	prev_child_p prev;
 	result_t child;
 };
+
+DEFINE_BASE_TYPE(prev_child_p)
 
 prev_child_p old_prev_child = NULL;
 
@@ -2031,7 +2055,6 @@ void prev_child_print(void *data, ostream_p ostream)
 	ostream_puts(ostream, "]");
 }
 
-
 bool add_child(result_p prev, result_p elem, result_p result)
 {
 	prev_child_p prev_child = CAST(prev_child_p, prev->data);
@@ -2040,8 +2063,8 @@ bool add_child(result_p prev, result_p elem, result_p result)
 	prev_child_p new_prev_child = malloc_prev_child();
 	new_prev_child->prev = prev_child;
 	result_assign(&new_prev_child->child, elem);
-	result_assign_ref_counted(result, new_prev_child, prev_child_print);
-	SET_TYPE("prev_child_p", new_prev_child);
+	result_assign_ref_counted(result, &new_prev_child->_base, prev_child_print);
+	SET_TYPE(prev_child_p, new_prev_child);
 	return TRUE;
 }
 
@@ -2050,8 +2073,8 @@ bool rec_add_child(result_p rec_result, result_p result)
 	prev_child_p new_prev_child = malloc_prev_child();
 	new_prev_child->prev = NULL;
 	result_assign(&new_prev_child->child, rec_result);
-	result_assign_ref_counted(result, new_prev_child, prev_child_print);
-	SET_TYPE("prev_child_p", new_prev_child);
+	result_assign_ref_counted(result, &new_prev_child->_base, prev_child_print);
+	SET_TYPE(prev_child_p, new_prev_child);
 	return TRUE;
 }
 
@@ -2079,6 +2102,19 @@ tree_p make_tree_with_children(tree_param_p tree_param, prev_child_p children)
 	return tree;
 }
 
+tree_p make_tree_with_children_of_tree(tree_param_p tree_param, tree_p list)
+{
+	tree_p tree = malloc_tree(tree_param);
+	tree->nr_children = list->nr_children;
+	tree->children = MALLOC_N(tree->nr_children, result_t);
+	for (int i = 0; i < tree->nr_children; i++)
+	{
+		RESULT_INIT(&tree->children[i]);
+		result_assign(&tree->children[i], &list->children[i]);
+	}
+	return tree;
+}
+
 void tree_print(void *data, ostream_p ostream)
 {
 	tree_p tree = CAST(tree_p, data);
@@ -2099,8 +2135,21 @@ bool make_tree(const result_p rule_result, void* data, result_p result)
 	prev_child_p children = CAST(prev_child_p, rule_result->data);
 	tree_param_p tree_param = (tree_param_p)data;
 	tree_p tree = make_tree_with_children(tree_param, children);
-	result_assign_ref_counted(result, tree, tree_print);
-	SET_TYPE("tree_p", tree);
+	result_assign_ref_counted(result, &tree->_node._base, tree_print);
+	SET_TYPE(tree_p, tree);
+	return TRUE;
+}
+
+bool make_tree_from_list(const result_p rule_result, void* data, result_p result)
+{
+	prev_child_p children = CAST(prev_child_p, rule_result->data);
+	tree_param_p tree_param = (tree_param_p)data;
+	tree_p tree = (   children != 0 && children->prev == 0 
+	    		   && children->child.data != 0 && node_is_tree(CAST(node_p, children->child.data), "list"))
+	    		? make_tree_with_children_of_tree(tree_param, CAST(tree_p, children->child.data))
+				: make_tree_with_children(tree_param, children);
+	result_assign_ref_counted(result, &tree->_node._base, tree_print);
+	SET_TYPE(tree_p, tree);
 	return TRUE;
 }
 
@@ -2227,14 +2276,16 @@ typedef struct ident_data
 	text_pos_t ps;
 } *ident_data_p;
 
+DEFINE_BASE_TYPE(ident_data_p)
+
 bool ident_add_char(result_p prev, char ch, result_p result)
 {
 	if (prev->data == NULL)
 	{
 		ident_data_p ident_data = MALLOC(struct ident_data);
 		ident_data->_base.release = NULL;
-		result_assign_ref_counted(result, ident_data, NULL);
-		SET_TYPE("ident_data_p", ident_data);
+		result_assign_ref_counted(result, &ident_data->_base, NULL);
+		SET_TYPE(ident_data_p, ident_data);
 		ident_data->ident[0] = ch;
 		ident_data->len = 1;
 	}
@@ -2261,17 +2312,19 @@ void pass_to_sequence(result_p prev, result_p seq)
 
 /*  Ident tree node structure */
 
-typedef struct ident_t *ident_p;
-struct ident_t
+typedef struct ident_node_t *ident_node_p;
+struct ident_node_t
 {
-	tree_node_t _node;
+	node_t _node;
 	char *name;
 	bool is_keyword;
 };
 
+DEFINE_SUB_BASE_TYPE(ident_node_p, node_p)
+
 void ident_print(void *data, ostream_p ostream)
 {
-	ostream_puts(ostream, CAST(ident_p, data)->name);
+	ostream_puts(ostream, CAST(ident_node_p, data)->name);
 }
 const char *ident_node_type = "ident_node_type";
 
@@ -2284,13 +2337,13 @@ bool create_ident_tree(const result_p rule_result, void* data, result_p result)
 		return TRUE;
 	}
 	ident_data->ident[ident_data->len] = '\0';
-	ident_p ident = MALLOC(struct ident_t);
-	init_tree_node(&ident->_node, ident_node_type, NULL);
-	tree_node_set_pos(&ident->_node, &ident_data->ps);
+	ident_node_p ident = MALLOC(struct ident_node_t);
+	init_node(&ident->_node, ident_node_type, NULL);
+	node_set_pos(&ident->_node, &ident_data->ps);
 	ident->name = ident_string(ident_data->ident);
 	ident->is_keyword = *keyword_state == 1;
-	result_assign_ref_counted(result, ident, ident_print);
-	SET_TYPE("ident_p", ident);
+	result_assign_ref_counted(result, &ident->_node._base, ident_print);
+	SET_TYPE(ident_node_p, ident);
 	return TRUE;
 }
 
@@ -2300,10 +2353,10 @@ char *ident_name(result_p result)
 		return "<result_p is NULL>";
 	if (result->data == 0)
 		return "result_p->data is NULL>";
-	tree_node_p tree_node = CAST(tree_node_p, result->data);
-	if (tree_node->type_name != ident_node_type)
+	node_p node = CAST(node_p, result->data);
+	if (node->type_name != ident_node_type)
 		return "<result_p not ident>";
-	ident_p ident = CAST(ident_p, tree_node);
+	ident_node_p ident = CAST(ident_node_p, node);
 	return ident->name;
 }
 		
@@ -2347,14 +2400,14 @@ void test_parse_ident(non_terminal_dict_p *all_nt, const char *input)
 			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
 		else
 		{
-			tree_node_p tree_node = (tree_node_p)result.data;
-			if (tree_node->line != 1 && tree_node->column != 1)
-				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
-			if (tree_node->type_name != ident_node_type)
+			node_p node = CAST(node_p, result.data);
+			if (node->line != 1 && node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", node->line, node->column);
+			if (node->type_name != ident_node_type)
 				fprintf(stderr, "ERROR: tree node is not of type ident_node_type\n");
 			else
 			{
-				ident_p ident = CAST(ident_p, tree_node);
+				ident_node_p ident = CAST(ident_node_p, node);
 				if (strcmp(ident->name, input) != 0)
 					fprintf(stderr, "ERROR: parsed value '%s' from '%s' instead of expected '%s'\n",
 					ident->name, input, input);
@@ -2395,6 +2448,8 @@ typedef struct char_data
 	text_pos_t ps;
 } *char_data_p;
 
+DEFINE_BASE_TYPE(char_data_p)
+
 void print_single_char(char ch, char del, ostream_p ostream)
 {
 	if (ch == '\0')
@@ -2426,8 +2481,8 @@ void char_set_pos(result_p result, text_pos_p ps)
 	char_data_p char_data = MALLOC(struct char_data);
 	char_data->ps = *ps;
 	char_data->_base.release = 0;
-	result_assign_ref_counted(result, char_data, char_data_print);
-	SET_TYPE("char_data_p", char_data);
+	result_assign_ref_counted(result, &char_data->_base, char_data_print);
+	SET_TYPE(char_data_p, char_data);
 }
 
 bool normal_char(result_p prev, char ch, result_p result)
@@ -2455,9 +2510,11 @@ bool escaped_char(result_p prev, char ch, result_p result)
 typedef struct char_node_t *char_node_p;
 struct char_node_t
 {
-	tree_node_t _node;
+	node_t _node;
 	char ch;
 };
+
+DEFINE_SUB_BASE_TYPE(char_node_p, node_p)
 
 const char *char_node_type = "char_node_type";
 
@@ -2473,11 +2530,11 @@ bool create_char_tree(const result_p rule_result, void* data, result_p result)
 	char_data_p char_data = CAST(char_data_p, rule_result->data);
 
 	char_node_p char_node = MALLOC(struct char_node_t);
-	init_tree_node(&char_node->_node, char_node_type, NULL);
-	tree_node_set_pos(&char_node->_node, &char_data->ps);
+	init_node(&char_node->_node, char_node_type, NULL);
+	node_set_pos(&char_node->_node, &char_data->ps);
 	char_node->ch = char_data->ch;
-	result_assign_ref_counted(result, char_node, char_node_print);
-	SET_TYPE("char_data_p", char_data);
+	result_assign_ref_counted(result, &char_node->_node._base, char_node_print);
+	SET_TYPE(char_data_p, char_data);
 	return TRUE;
 }
 
@@ -2526,14 +2583,14 @@ void test_parse_char(non_terminal_dict_p *all_nt, const char *input, char ch)
 			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
 		else
 		{
-			tree_node_p tree_node = (tree_node_p)result.data;
-			if (tree_node->line != 1 && tree_node->column != 1)
-				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
-			if (tree_node->type_name != char_node_type)
+			node_p node = CAST(node_p, result.data);
+			if (node->line != 1 && node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", node->line, node->column);
+			if (node->type_name != char_node_type)
 				fprintf(stderr, "ERROR: tree node is not of type char_node_type\n");
 			else
 			{
-				char_node_p char_node = (char_node_p)tree_node;
+				char_node_p char_node = (char_node_p)node;
 				if (char_node->ch != ch)
 					fprintf(stderr, "ERROR: parsed value '%c' from '%s' instead of expected '%c'\n",
 					char_node->ch, input, ch);
@@ -2596,6 +2653,8 @@ typedef struct string_data
 	text_pos_t ps;
 } *string_data_p;
 
+DEFINE_BASE_TYPE(string_data_p)
+
 void string_data_print(void *data, ostream_p ostream)
 {
 	string_data_p string_data = CAST(string_data_p, data);
@@ -2625,8 +2684,8 @@ void string_set_pos(result_p result, text_pos_p ps)
 		string_data->buffer = NULL;
 		string_data->length = 0;
 		string_data->_base.release = 0;
-		result_assign_ref_counted(result, string_data, string_data_print);
-		SET_TYPE("string_data_p", string_data);
+		result_assign_ref_counted(result, &string_data->_base, string_data_print);
+		SET_TYPE(string_data_p, string_data);
 	}
 }
 
@@ -2679,10 +2738,12 @@ bool string_data_add_third_octal(result_p prev, char ch, result_p result)
 typedef struct string_node_t *string_node_p;
 struct string_node_t
 {
-	tree_node_t _node;
+	node_t _node;
 	const char *str;
 	size_t length;
 };
+
+DEFINE_SUB_BASE_TYPE(string_node_p, node_p)
 
 const char *string_node_type = "string_node_type";
 
@@ -2700,8 +2761,8 @@ bool create_string_tree(const result_p rule_result, void* data, result_p result)
 	string_data_p string_data = CAST(string_data_p, rule_result->data);
 	
 	string_node_p string_node = MALLOC(struct string_node_t);
-	init_tree_node(&string_node->_node, string_node_type, NULL);
-	tree_node_set_pos(&string_node->_node, &string_data->ps);
+	init_node(&string_node->_node, string_node_type, NULL);
+	node_set_pos(&string_node->_node, &string_data->ps);
 	char *s = MALLOC_N(string_data->length + 1, char);
 	string_node->str = s;
 	string_node->length = string_data->length + 1;
@@ -2717,8 +2778,8 @@ bool create_string_tree(const result_p rule_result, void* data, result_p result)
 		}
 	}
 	*s = '\0';
-	result_assign_ref_counted(result, string_node, string_node_print);
-	SET_TYPE("string_node_p", string_node);
+	result_assign_ref_counted(result, &string_node->_node._base, string_node_print);
+	SET_TYPE(string_node_p, string_node);
 	return TRUE;
 }
 		
@@ -2771,14 +2832,14 @@ void test_parse_string(non_terminal_dict_p *all_nt, const char *input, const cha
 			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
 		else
 		{
-			tree_node_p tree_node = (tree_node_p)result.data;
-			if (tree_node->line != 1 && tree_node->column != 1)
-				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
-			if (tree_node->type_name != string_node_type)
+			node_p node = CAST(node_p, result.data);
+			if (node->line != 1 && node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", node->line, node->column);
+			if (node->type_name != string_node_type)
 				fprintf(stderr, "ERROR: tree node is not of type string_node_type\n");
 			else
 			{
-				string_node_p string_node = CAST(string_node_p, tree_node);
+				string_node_p string_node = CAST(string_node_p, node);
 				if (strcmp(string_node->str, str) != 0)
 					fprintf(stderr, "ERROR: parsed value '%s' from '%s' instead of expected '%s'\n",
 					string_node->str, input, str);
@@ -2825,6 +2886,8 @@ typedef struct int_data
 	text_pos_t ps;
 } *int_data_p;
 
+DEFINE_BASE_TYPE(int_data_p)
+
 void int_data_print(void *data, ostream_p ostream)
 {
 	int_data_p int_data = CAST(int_data_p, data);
@@ -2852,8 +2915,8 @@ bool int_data_add_char(result_p prev, char ch, result_p result)
 		int_data->sign = 1;
 		int_data->_base.release = 0;
 		int_data->ps.cur_line = -1;
-		result_assign_ref_counted(result, int_data, int_data_print);
-		SET_TYPE("int_data_p", int_data);
+		result_assign_ref_counted(result, &int_data->_base, int_data_print);
+		SET_TYPE(int_data_p, int_data);
 	}
 	else
 		result_assign(result, prev);
@@ -2923,9 +2986,11 @@ bool int_data_add_char(result_p prev, char ch, result_p result)
 typedef struct int_node_t *int_node_p;
 struct int_node_t
 {
-	tree_node_t _node;
+	node_t _node;
 	long long int value;
 };
+
+DEFINE_SUB_BASE_TYPE(int_node_p, node_p)
 
 const char *int_node_type = "int_node_type";
 
@@ -2933,7 +2998,7 @@ void int_node_print(void *data, ostream_p ostream)
 {
 	int_node_p int_node = (int_node_p)data;
 	char buffer[51];
-	snprintf(buffer, 50, "%lld", int_node->value);
+	snprintf(buffer, 50, "ii %lld", int_node->value);
 	buffer[50] = '\0';
 	ostream_puts(ostream, buffer);
 }
@@ -2943,11 +3008,11 @@ bool create_int_tree(const result_p rule_result, void* data, result_p result)
 	int_data_p int_data = CAST(int_data_p, rule_result->data);
 	
 	int_node_p int_node = MALLOC(struct int_node_t);
-	init_tree_node(&int_node->_node, int_node_type, NULL);
-	tree_node_set_pos(&int_node->_node, &int_data->ps);
+	init_node(&int_node->_node, int_node_type, NULL);
+	node_set_pos(&int_node->_node, &int_data->ps);
 	int_node->value = int_data->sign * int_data->value;
-	result_assign_ref_counted(result, int_node, int_node_print);
-	SET_TYPE("int_data_p", int_data);
+	result_assign_ref_counted(result, &int_node->_node._base, int_node_print);
+	SET_TYPE(int_node_p, int_node);
 	return TRUE;
 }
 		
@@ -3000,14 +3065,14 @@ void test_parse_int(non_terminal_dict_p *all_nt, const char *input, long long in
 			fprintf(stderr, "ERROR: parsing '%s' did not return result\n", input);
 		else
 		{
-			tree_node_p tree_node = (tree_node_p)result.data;
-			if (tree_node->line != 1 && tree_node->column != 1)
-				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", tree_node->line, tree_node->column);
-			if (tree_node->type_name != int_node_type)
+			node_p node = CAST(node_p, result.data);
+			if (node->line != 1 && node->column != 1)
+				fprintf(stderr, "WARNING: tree node position %d:%d is not 1:1\n", node->line, node->column);
+			if (node->type_name != int_node_type)
 				fprintf(stderr, "ERROR: tree node is not of type int_node_type\n");
 			else
 			{
-				int_node_p int_node = (int_node_p)tree_node;
+				int_node_p int_node = (int_node_p)node;
 				if (int_node->value != value)
 					fprintf(stderr, "ERROR: parsed value %lld from '%s' instead of expected %lld\n",
 					int_node->value, input, value);
@@ -3044,15 +3109,16 @@ bool equal_string(result_p result, const void *argument)
 {
 	const char *keyword_name = (const char*)argument;
 	return    result->data != NULL
-		   && ((tree_node_p)result->data)->type_name == ident_node_type
-		   && strcmp(CAST(ident_p, result->data)->name, keyword_name) == 0;
+		   && CAST(node_p, result->data)->type_name == ident_node_type
+		   && strcmp(CAST(ident_node_p, result->data)->name, keyword_name) == 0;
 }
 
 bool not_a_keyword(result_p result, const void *argument)
 {
-	ident_p ident = CAST(ident_p, result->data);
+	ident_node_p ident = CAST(ident_node_p, result->data);
 	return !ident->is_keyword;
 }
+
 
 const char * const list_type = "list";
 
@@ -3065,10 +3131,10 @@ bool add_seq_as_list(result_p prev, result_p seq, void *data, result_p result)
 	new_prev_child->prev = prev_child;
 	tree_param_p tree_param = (tree_param_p)data;
 	tree_p list = make_tree_with_children(tree_param, CAST(prev_child_p, seq->data));
-	result_assign_ref_counted(&new_prev_child->child, list, tree_print);
-	SET_TYPE("tree_p", list);
-	result_assign_ref_counted(result, new_prev_child, NULL);
-	SET_TYPE("prev_child_p", new_prev_child);
+	result_assign_ref_counted(&new_prev_child->child, &list->_node._base, tree_print);
+	SET_TYPE(tree_p, list);
+	result_assign_ref_counted(result, &new_prev_child->_base, NULL);
+	SET_TYPE(prev_child_p, new_prev_child);
 	return TRUE;
 }
 
@@ -3078,8 +3144,9 @@ bool add_seq_as_list(result_p prev, result_p seq, void *data, result_p result)
 #define WS NTF("white_space", 0)
 #define PASS rules->end_function = pass_tree;
 #define TREE(N,F) rules->end_function = make_tree; { static tree_param_t tp = { N, F }; rules->end_function_data = &tp; }
-#define TREE_PARAM(N,F) tree_param_t N##_tp = { #N, F };
-#define TREE_TP(N) rules->end_function = make_tree; rules->end_function_data = &TP##_tp;
+#define TREE_TP(N) rules->end_function = make_tree; rules->end_function_data = &N##_tp;
+#define TREE_FROM_LIST(N,F) rules->end_function = make_tree_from_list; { static tree_param_t tp = { N, F }; rules->end_function_data = &tp; }
+#define TREE_FROM_LIST_TP(N) rules->end_function = make_tree_from_list; rules->end_function_data = &N##_tp;
 #define KEYWORD(K) NTF("ident", 0) element->condition = equal_string; element->condition_argument = ident_string(K); *keyword_state = 1; WS
 #define OPTN OPT(0)
 #define IDENT NTF("ident", add_child) element->condition = not_a_keyword; WS
@@ -3088,10 +3155,12 @@ bool add_seq_as_list(result_p prev, result_p seq, void *data, result_p result)
 #define REC_RULEC REC_RULE(rec_add_child);
 #define CHAR_WS(C) CHAR(C) WS
 
-TREE_PARAM(declaration, "")
+#define TREE_PARAM(N,F) tree_param_t N##_tp = { #N, F };
+
+TREE_PARAM(declaration, "%*%*")
 TREE_PARAM(list, "")
-TREE_PARAM(vardecl, "")
-TREE_PARAM(decl_init, "")
+TREE_PARAM(decl, "%*;\n")
+TREE_PARAM(decl_init, "%*%*")
 
 void c_grammar(non_terminal_dict_p *all_nt)
 {
@@ -3237,9 +3306,9 @@ void c_grammar(non_terminal_dict_p *all_nt)
 				RULE NT("declarator")
 				{ GROUPING
 					RULE WS CHAR_WS('=') NT("initializer") TREE("init", " = %*")
-				} OPTN ADD_CHILD TREE("decl_init","%*%*")
-			} SEQL("") ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE("vardecl","%*;\n")
-		} ADD_CHILD TREE("declaration", "%*%*")
+				} OPTN ADD_CHILD TREE_TP(decl_init)
+			} SEQL(", ") ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE_FROM_LIST_TP(decl)
+		} ADD_CHILD TREE_TP(declaration)
 		RULE
 		{ GROUPING
 			RULE NT("storage_class_specifier") PASS
@@ -3262,9 +3331,9 @@ void c_grammar(non_terminal_dict_p *all_nt)
 				RULE NT("declarator")
 				{ GROUPING
 					RULE WS CHAR_WS('=') NT("initializer") TREE("init", " = %*")
-				} OPTN ADD_CHILD TREE("decl_init","%*%*")
-			} SEQL("") OPTN ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE("decl","%*;\n")
-		} ADD_CHILD TREE("declaration", "%*%*")
+				} OPTN ADD_CHILD TREE_TP(decl_init)
+			} SEQL(", ") OPTN ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE_FROM_LIST_TP(decl)
+		} ADD_CHILD TREE_TP(declaration)
 
 	NT_DEF("var_declaration")
 		RULE
@@ -3278,9 +3347,9 @@ void c_grammar(non_terminal_dict_p *all_nt)
 				RULE NT("declarator")
 				{ GROUPING
 					RULE WS CHAR_WS('=') NT("initializer") TREE("init", " = %*")
-				} OPTN ADD_CHILD TREE("decl_init","%*%*")
-			} SEQL("") OPTN ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE("decl","%*;\n")
-		} ADD_CHILD TREE("declaration", "%*%*")
+				} OPTN ADD_CHILD TREE_TP(decl_init)
+			} SEQL(", ") OPTN ADD_CHILD { CHAIN CHAR_WS(',') } CHAR_WS(';') TREE_FROM_LIST_TP(decl)
+		} ADD_CHILD TREE_TP(declaration)
 
 	NT_DEF("storage_class_specifier")
 		RULE KEYWORD("typedef") TREE("typedef","typedef")
@@ -3441,7 +3510,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 			RULE KEYWORD("case") NT("constant_expr") TREE("case","case %*")
 			RULE KEYWORD("default") TREE("default", "default")
 		} ADD_CHILD CHAR_WS(':') NT("statement") TREE("label","%*:")
-		RULE CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}') TREE("statements","%<{\n%>%*\n%<}%>")
+		RULE CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}') TREE_FROM_LIST("statements","%<{\n%>%*\n%<}%>")
 		RULE NT("expr") OPTN CHAR_WS(';') TREE("semi","%*;\n")
 		RULE KEYWORD("if") WS CHAR_WS('(') NT("expr") CHAR_WS(')') NT("statement")
 		{ GROUPING
@@ -3721,10 +3790,10 @@ void unparse(result_p result, ostream_p ostream)
 		; //ostream_puts(ostream, "[NULL]");
 	else
 	{
-		tree_node_p tree_node = (tree_node_p)result->data;
-		if (tree_node->type_name == tree_node_type)
+		node_p node = CAST(node_p, result->data);
+		if (node->type_name == tree_node_type)
 		{
-			tree_p tree = (tree_p)tree_node;
+			tree_p tree = (tree_p)node;
 			if (tree->tree_param == NULL)
 				ostream_puts(ostream, "[tree_param NULL]");
 			else if (tree->tree_param->name == list_type)
@@ -3829,7 +3898,7 @@ void unparse(result_p result, ostream_p ostream)
 		else
 		{
 			ostream_puts(ostream, "(type_name:");
-			ostream_puts(ostream, tree_node->type_name);
+			ostream_puts(ostream, node->type_name);
 			ostream_puts(ostream, ")");
 		}
 			
@@ -3880,13 +3949,19 @@ struct tree_iterator
 	result_t *children;
 };
 
+node_p tree_child_node(tree_p tree, int nr)
+{
+	result_p result = tree_child(tree, nr);
+	return result != NULL ? CAST(node_p, result->data) : NULL;
+}
+
 tree_p tree_of_result(result_p result)
 {
 	if (result != NULL && result->data != NULL)
 	{
-		tree_node_p tree_node = (tree_node_p)result->data;
-		if (tree_node->type_name == tree_node_type)
-			return CAST(tree_p, tree_node);
+		node_p node = CAST(node_p, result->data);
+		if (node->type_name == tree_node_type)
+			return CAST(tree_p, node);
 	}
 	return NULL;
 }
@@ -3897,10 +3972,10 @@ tree_p list_of_result(result_p result)
 {
 	if (result != NULL && result->data != NULL)
 	{
-		tree_node_p tree_node = (tree_node_p)result->data;
-		if (tree_node->type_name == tree_node_type)
+		node_p node = CAST(node_p, result->data);
+		if (node->type_name == tree_node_type)
 		{
-			tree_p tree = CAST(tree_p, tree_node);
+			tree_p tree = CAST(tree_p, node);
 			return tree->tree_param->name == list_type ? tree : NULL;
 		}
 	}
@@ -3924,18 +3999,23 @@ void tree_iterator_init(tree_iterator_p tree_iterator, result_p result)
 #define TREE_ITERATOR(N,R) tree_iterator_t N; tree_iterator_init(&N, R)
 #define ITERATOR_TREE(C,I,N) tree_p C = tree_of_result(&I.children[N]);
 
+node_p node_of_result(result_p result)
+{
+	return result != 0 && result->data != 0 ? CAST(node_p, result->data) : NULL;
+}
+
 const char *tree_name(result_p result)
 {
 	if (result == 0)
 		return "<result_p is NULL>";
 	if (result->data == 0)
 		return "<result_p->data is NULL>";
-	tree_node_p tree_node = CAST(tree_node_p, result->data);
-	if (tree_node->type_name == ident_node_type)
-		return CAST(ident_p, tree_node)->name;
-	if (tree_node->type_name == tree_node_type)
+	node_p node = CAST(node_p, result->data);
+	if (node->type_name == ident_node_type)
+		return CAST(ident_node_p, node)->name;
+	if (node->type_name == tree_node_type)
 	{
-		tree_p tree = CAST(tree_p, tree_node);
+		tree_p tree = CAST(tree_p, node);
 		if (tree->tree_param == NULL || tree->tree_param->name == NULL)
 			return "<result->data->tree_param == NULL>";
 		return tree->tree_param->name;
@@ -3943,9 +4023,9 @@ const char *tree_name(result_p result)
 	return "<result_p->data has no name>";
 }
 
-void tree_node_print(void *data, ostream_p ostream)
+void node_print(void *data, ostream_p ostream)
 {
-	tree_node_p tree = CAST(tree_node_p, data);
+	node_p tree = CAST(node_p, data);
 	if (tree->type_name == ident_node_type)
 		ident_print(data, ostream);
 	else if (tree->type_name == char_node_type)
@@ -3956,7 +4036,7 @@ void tree_node_print(void *data, ostream_p ostream)
 		int_node_print(data, ostream);
 }
 
-tree_node_p make_tree_for(tree_param_p tree_param, int nr, ...)
+node_p make_tree_for(tree_param_p tree_param, int nr, ...)
 {
 	tree_p tree = malloc_tree(tree_param);
 	tree->nr_children = nr;
@@ -3966,22 +4046,40 @@ tree_node_p make_tree_for(tree_param_p tree_param, int nr, ...)
 	for (int i = 0; i < nr; i++)
 	{
 		RESULT_INIT(&tree->children[i]);
-		tree_node_p tree_node = va_arg(args, tree_node_p);
-		if (tree_node != NULL)
-			result_assign_ref_counted(&tree->children[i], tree_node, tree_node_print);
+		node_p node = va_arg(args, node_p);
+		//fprintf(stderr, "arg %d: %p\n", i, node);
+		
+		if (node != NULL)
+			result_assign_ref_counted(&tree->children[i], &node->_base, node_print);
 	}
 	va_end(args);
+	//fprintf(stderr, "make_tree_for returns %p\n", &tree->_node);
 	return &tree->_node;
 }
 
-tree_node_p make_tree_node_ident(const char *name)
+node_p make_ident_node(const char *name)
 {
-	ident_p ident = MALLOC(struct ident_t);
-	init_tree_node(&ident->_node, ident_node_type, NULL);
+	ident_node_p ident = MALLOC(struct ident_node_t);
+	init_node(&ident->_node, ident_node_type, NULL);
 	ident->name = ident_string(name);
 	return &ident->_node;
 }
 
+
+typedef struct task *task_p;
+struct task
+{
+	char *name;
+	int nr;
+	char *result_var_name;
+	int nr_local_vars;
+	task_p next;
+};
+task_p tasks = NULL;
+task_p *ref_next_task = &tasks;
+int nr_tasks = 0;
+
+task_p cur_task = NULL;
 
 
 typedef struct var_context *var_context_p;
@@ -4012,26 +4110,122 @@ char *var_context_global_name(var_context_p var_context, char *name)
 tree_list_p new_global_vars = NULL;
 tree_list_p *ref_new_global_var = &new_global_vars;
 
-void pass1_expr(tree_node_p node, var_context_p var_context)
+void pass1_expr(node_p node, var_context_p var_context, ostream_p ostream)
 {
 	if (node == NULL)
 		return;
 		
 	if (node->type_name == ident_node_type)
 	{
-		ident_p ident = CAST(ident_p, node);
+		ident_node_p ident = CAST(ident_node_p, node);
+		printf("Replacing %s ", ident->name);
 		ident->name = var_context_global_name(var_context, ident->name);
+		printf("with %s\n", ident->name);
 	}
 	else if (node->type_name == tree_node_type)
 	{
 		tree_p tree = CAST(tree_p, node);
 		for (int i = 0; i < tree->nr_children; i++)
-			pass1_expr(CAST(tree_node_p, tree->children[i].data), var_context);
+			pass1_expr(CAST(node_p, tree->children[i].data), var_context, ostream);
 	}
 }
 
-void pass1_statement(tree_p statement)
+void pass1_statement(result_p result, var_context_p var_context, ostream_p ostream)
 {
+	tree_p statement = tree_of_result(result);
+	for (int i = 0; i < indent; i++)
+		printf("  ");
+	if (statement == NULL)
+	{
+		printf("pass1_statement: NULL\n");
+		return;
+	}
+	indent++;
+	if (tree_is(statement, "list") || tree_is(statement, "statements"))
+	{
+		printf("statements / list\n");
+		for (int i = 1; i <= statement->nr_children; i++)
+		{
+			tree_p child = tree_child_tree(statement, i);
+			if (child == NULL)
+			{}
+			else if (tree_is(child, "declaration"))
+			{
+				//result_print(tree_child(statement, i), ostream);
+				tree_p type = tree_child_tree(child, 1);
+				tree_p decl = tree_child_tree(child, 2);
+				for (int j = 1; j <= decl->nr_children; j++)
+				{
+					//printf("%d", j);
+					tree_p decl_init = tree_child_tree(decl, j);
+					pass1_expr(tree_child_node(decl_init, 2), var_context, ostream);
+					node_p var_node = tree_child_node(decl_init, 1);
+					if (var_node->type_name == ident_node_type)
+					{
+						ident_node_p ident = CAST(ident_node_p, var_node);
+						char *loc_var_name = strprintf("%s_var%d_%s", cur_task->name, ++cur_task->nr_local_vars, ident->name);
+						// Add global var
+						var_context = new_var_context(ident->name, loc_var_name, var_context);
+						//printf("var_local %s => %s\n", ident->name, loc_var_name);
+						node_p declaration 
+							= make_tree_for(&declaration_tp, 2,
+								type,
+								make_tree_for(&decl_tp, 1,
+									make_tree_for(&list_tp, 1,
+										make_tree_for(&decl_init_tp, 2,
+											make_ident_node(loc_var_name),
+											tree_child_tree(decl_init, 2)))));
+						*ref_new_global_var = new_result_list((tree_p)declaration);
+						ref_new_global_var = &(*ref_new_global_var)->next;
+					}
+					else
+					{
+						printf("ERROR var decl: ");
+						result_print(tree_child(decl_init, 1), ostream);
+						printf("\n");
+					}
+				}
+				printf("\n");
+			}
+			else
+				pass1_statement(tree_child(statement, i), var_context, ostream);
+		}
+	}
+	else if (tree_is(statement, "if"))
+	{
+		pass1_expr(tree_child_node(statement, 1), var_context, ostream);
+		pass1_statement(tree_child(statement, 2), var_context, ostream);
+		pass1_statement(tree_child(tree_child_tree(statement, 3), 1),  var_context, ostream);
+	}
+	else if (tree_is(statement, "queuefor"))
+	{
+		pass1_statement(tree_child(statement, 2), var_context, ostream);
+	}
+	else if (tree_is(statement, "poll"))
+	{
+		pass1_statement(tree_child(statement, 1), var_context, ostream);
+		tree_p atmost_opt = tree_child_tree(statement, 2);
+		if (atmost_opt != NULL)
+		{
+			pass1_expr(tree_child_node(atmost_opt, 1), var_context, ostream);
+			pass1_statement(tree_child(atmost_opt, 2), var_context, ostream);
+		}
+	}		
+	else if (tree_is(statement, "semi"))
+	{
+		pass1_expr(tree_child_node(statement, 1), var_context, ostream);
+	}
+	else if (tree_is(statement, "ret"))
+	{
+		pass1_expr(tree_child_node(statement, 1), var_context, ostream);
+	}
+	else
+	{
+		printf("pass1_statement: ");
+		tree_print(statement, ostream);
+		printf("\n");
+	}	
+	indent--;
 }
 
 
@@ -4039,7 +4233,7 @@ void compile(result_p result, ostream_p ostream)
 {
 	//result_list_p tasks = NULL;
 	//result_list_p *ref_next_task = &tasks;
-
+	
 	TREE_ITERATOR(decls, result);
 	for (int i = 0; i < decls.nr_children; i++)
 	{
@@ -4052,29 +4246,37 @@ void compile(result_p result, ostream_p ostream)
 			if (is_task)
 			{
 				char *task_name = ident_name(tree_child(tree_child_tree(decl, 2), 1));
-				const char *result_type = tree_name(tree_child(types, 2));
-				printf("task %s %s\n", task_name, result_type);
-				if (strcmp(result_type, "void") != 0)
+				result_p result_type = tree_child(types, 2);
+				const char *result_type_name = tree_name(result_type);
+				char *result_var_name = strprintf("%s_result", task_name);
+				cur_task = MALLOC(struct task);
+				cur_task->name = task_name;
+				cur_task->nr = nr_tasks++;
+				cur_task->result_var_name = result_var_name;
+				cur_task->nr_local_vars = 0;
+				cur_task->next = NULL;
+				*ref_next_task = cur_task;
+				ref_next_task = &cur_task->next;
+				printf("task %s %s\n", task_name, result_type_name);
+				if (strcmp(result_type_name, "void") != 0)
 				{
 					// Add global var
-					/*
-					tree_node_p declaration 
+					node_p declaration 
 						= make_tree_for(&declaration_tp, 2,
-							make_tree_for(&list_tp, 1, result_type),
-							make_tree_for(&vardecl_tp, 1,
+							make_tree_for(&list_tp, 1, node_of_result(result_type)),
+							make_tree_for(&decl_tp, 1,
 								make_tree_for(&list_tp, 1,
 									make_tree_for(&decl_init_tp, 2,
-										make_tree_node_ident(strprintf("%s_result", task_name)),
+										make_ident_node(result_var_name),
 										NULL))));
 					*ref_new_global_var = new_result_list((tree_p)declaration);
 					ref_new_global_var = &(*ref_new_global_var)->next;
-					*/
 				}
-				result_print(&decls.children[i], ostream);
+				pass1_statement(tree_child(tree_child_tree(tree_child_tree(decl, 2), 3), 1), NULL, ostream);
 			}
 			else
 			{
-				if (tree_is(tree_child_tree(decl, 2), "vardecl"))
+				if (tree_is(tree_child_tree(decl, 2), "decl"))
 					printf("global variable ");
 				result_print(&decls.children[i], ostream);
 			}
