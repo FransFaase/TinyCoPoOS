@@ -2043,7 +2043,7 @@ prev_child_p malloc_prev_child()
 void prev_child_print(void *data, ostream_p ostream)
 {
 	ostream_puts(ostream, "prev_child[ ");
-	prev_child_p prev_child = data != NULL ? CAST(prev_child_p, data) : NULL;
+	prev_child_p prev_child = CAST(prev_child_p, data);
 	for (; prev_child != NULL; prev_child = prev_child->prev)
 	{
 		if (prev_child->child.data == NULL || prev_child->child.print == NULL)
@@ -3909,6 +3909,77 @@ void unparse(result_p result, ostream_p ostream)
 
 
 
+typedef struct result_list *result_list_p;
+struct result_list
+{
+	ref_counted_base_t _base;
+	result_t value;
+	result_t next;
+};
+
+DEFINE_BASE_TYPE(result_list_p)
+
+result_list_p old_result_lists = NULL;
+
+void result_list_release(void *data)
+{
+	result_list_p result_list = CAST(result_list_p, data);
+	RESULT_RELEASE(&result_list->value);
+	RESULT_RELEASE(&result_list->next);
+	*(result_list_p*)result_list = old_result_lists;
+	old_result_lists = result_list;
+}
+
+void result_list_init(result_list_p result_list)
+{
+	result_list->_base.cnt = 1;
+	result_list->_base.release = result_list_release;
+	RESULT_INIT(&result_list->value);
+	RESULT_INIT(&result_list->next);
+}
+
+result_list_p malloc_result_list(void)
+{
+	result_list_p result_list;
+	if (old_result_lists)
+	{   result_list = old_result_lists;
+		old_result_lists = *(result_list_p*)old_result_lists;
+	}
+	else
+		result_list = MALLOC(struct result_list);
+	result_list_init(result_list);
+	return result_list;
+}
+
+void result_list_print(void *data, ostream_p ostream)
+{
+	result_list_p result_list = CAST(result_list_p, data);
+	if (result_list != NULL)
+	{
+		if (result_list->value.data == NULL || result_list->value.print == NULL)
+			ostream_puts(ostream, "NULL");
+		else
+			result_list->value.print(result_list->value.data, ostream);
+		if (result_list->value.data == NULL || result_list->value.print == NULL)
+			ostream_puts(ostream, "NULL");
+		else
+		{
+			ostream_puts(ostream, ", ");
+			result_list->value.print(result_list->value.data, ostream);
+		}
+	}
+}
+
+void make_result_list(const result_p result, result_p value, result_p next)
+{
+	result_list_p result_list = malloc_result_list();
+	result_assign(&result_list->value, value);
+	result_assign(&result_list->next, next);
+	result_assign_ref_counted(result, &result_list->_base, result_list_print);
+	SET_TYPE(result_list_p, result_list);
+}	
+
+
 // ----------------------------------------------------------------------------------------
 
 
@@ -4065,6 +4136,13 @@ node_p make_ident_node(const char *name)
 	return &ident->_node;
 }
 
+typedef struct task_func *task_func_p;
+struct task_func
+{
+	const char *name;
+	result_t statement_trace;
+	task_func_p next;
+};
 
 typedef struct task *task_p;
 struct task
@@ -4073,6 +4151,9 @@ struct task
 	int nr;
 	char *result_var_name;
 	int nr_local_vars;
+	int nr_funcs;
+	task_func_p task_funcs;
+	task_func_p *ref_next_task_func;
 	task_p next;
 };
 task_p tasks = NULL;
@@ -4081,6 +4162,16 @@ int nr_tasks = 0;
 
 task_p cur_task = NULL;
 
+void add_task_func(result_p statement_trace)
+{
+	task_func_p task_func = MALLOC(struct task_func);
+	task_func->name = strprintf("%s_step%d", ++cur_task->nr_funcs);
+	RESULT_INIT(&task_func->statement_trace);
+	task_func->next = NULL;
+	result_assign(&task_func->statement_trace, statement_trace);
+	*cur_task->ref_next_task_func = task_func;
+	cur_task->ref_next_task_func = &task_func->next;
+}
 
 typedef struct var_context *var_context_p;
 struct var_context
@@ -4130,7 +4221,7 @@ void pass1_expr(node_p node, var_context_p var_context, ostream_p ostream)
 	}
 }
 
-void pass1_statement(result_p result, var_context_p var_context, ostream_p ostream)
+void pass1_statement(result_p result, result_p parent_statement_trace, var_context_p var_context, ostream_p ostream)
 {
 	tree_p statement = tree_of_result(result);
 	for (int i = 0; i < indent; i++)
@@ -4141,6 +4232,9 @@ void pass1_statement(result_p result, var_context_p var_context, ostream_p ostre
 		return;
 	}
 	indent++;
+	result_t statement_trace;
+	RESULT_INIT(&statement_trace);
+	make_result_list(&statement_trace, result, parent_statement_trace);
 	if (tree_is(statement, "list") || tree_is(statement, "statements"))
 	{
 		printf("statements / list\n");
@@ -4188,27 +4282,27 @@ void pass1_statement(result_p result, var_context_p var_context, ostream_p ostre
 				printf("\n");
 			}
 			else
-				pass1_statement(tree_child(statement, i), var_context, ostream);
+				pass1_statement(tree_child(statement, i), &statement_trace, var_context, ostream);
 		}
 	}
 	else if (tree_is(statement, "if"))
 	{
 		pass1_expr(tree_child_node(statement, 1), var_context, ostream);
-		pass1_statement(tree_child(statement, 2), var_context, ostream);
-		pass1_statement(tree_child(tree_child_tree(statement, 3), 1),  var_context, ostream);
+		pass1_statement(tree_child(statement, 2), &statement_trace, var_context, ostream);
+		pass1_statement(tree_child(tree_child_tree(statement, 3), 1),  &statement_trace, var_context, ostream);
 	}
 	else if (tree_is(statement, "queuefor"))
 	{
-		pass1_statement(tree_child(statement, 2), var_context, ostream);
+		pass1_statement(tree_child(statement, 2), &statement_trace, var_context, ostream);
 	}
 	else if (tree_is(statement, "poll"))
 	{
-		pass1_statement(tree_child(statement, 1), var_context, ostream);
+		pass1_statement(tree_child(statement, 1), &statement_trace, var_context, ostream);
 		tree_p atmost_opt = tree_child_tree(statement, 2);
 		if (atmost_opt != NULL)
 		{
 			pass1_expr(tree_child_node(atmost_opt, 1), var_context, ostream);
-			pass1_statement(tree_child(atmost_opt, 2), var_context, ostream);
+			pass1_statement(tree_child(atmost_opt, 2), &statement_trace, var_context, ostream);
 		}
 	}		
 	else if (tree_is(statement, "semi"))
@@ -4224,7 +4318,8 @@ void pass1_statement(result_p result, var_context_p var_context, ostream_p ostre
 		printf("pass1_statement: ");
 		tree_print(statement, ostream);
 		printf("\n");
-	}	
+	}
+	RESULT_RELEASE(&statement_trace);	
 	indent--;
 }
 
@@ -4254,6 +4349,9 @@ void compile(result_p result, ostream_p ostream)
 				cur_task->nr = nr_tasks++;
 				cur_task->result_var_name = result_var_name;
 				cur_task->nr_local_vars = 0;
+				cur_task->nr_funcs = 0;
+				cur_task->task_funcs = NULL;
+				cur_task->ref_next_task_func = &cur_task->task_funcs;
 				cur_task->next = NULL;
 				*ref_next_task = cur_task;
 				ref_next_task = &cur_task->next;
@@ -4272,7 +4370,10 @@ void compile(result_p result, ostream_p ostream)
 					*ref_new_global_var = new_result_list((tree_p)declaration);
 					ref_new_global_var = &(*ref_new_global_var)->next;
 				}
-				pass1_statement(tree_child(tree_child_tree(tree_child_tree(decl, 2), 3), 1), NULL, ostream);
+				result_t statement_trace;
+				RESULT_INIT(&statement_trace);
+				pass1_statement(tree_child(tree_child_tree(tree_child_tree(decl, 2), 3), 1), &statement_trace, NULL, ostream);
+				RESULT_RELEASE(&statement_trace);
 			}
 			else
 			{
