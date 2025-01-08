@@ -3960,12 +3960,12 @@ void result_list_print(void *data, ostream_p ostream)
 			ostream_puts(ostream, "NULL");
 		else
 			result_list->value.print(result_list->value.data, ostream);
-		if (result_list->value.data == NULL || result_list->value.print == NULL)
+		if (result_list->next.data == NULL || result_list->next.print == NULL)
 			ostream_puts(ostream, "NULL");
 		else
 		{
-			ostream_puts(ostream, ", ");
-			result_list->value.print(result_list->value.data, ostream);
+			ostream_puts(ostream, ",\n");
+			result_list->next.print(result_list->next.data, ostream);
 		}
 	}
 }
@@ -4165,7 +4165,7 @@ task_p cur_task = NULL;
 void add_task_func(result_p statement_trace)
 {
 	task_func_p task_func = MALLOC(struct task_func);
-	task_func->name = strprintf("%s_step%d", ++cur_task->nr_funcs);
+	task_func->name = strprintf("%s_step%d", cur_task->name, ++cur_task->nr_funcs);
 	RESULT_INIT(&task_func->statement_trace);
 	task_func->next = NULL;
 	result_assign(&task_func->statement_trace, statement_trace);
@@ -4293,16 +4293,22 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 	}
 	else if (tree_is(statement, "queuefor"))
 	{
+		add_task_func(&statement_trace);
 		pass1_statement(tree_child(statement, 2), &statement_trace, var_context, ostream);
 	}
 	else if (tree_is(statement, "poll"))
 	{
+		add_task_func(&statement_trace);
 		pass1_statement(tree_child(statement, 1), &statement_trace, var_context, ostream);
 		tree_p atmost_opt = tree_child_tree(statement, 2);
 		if (atmost_opt != NULL)
 		{
+			result_t atmost_statement_trace;
+			RESULT_INIT(&atmost_statement_trace);
+			make_result_list(&atmost_statement_trace, tree_child(statement, 2), &statement_trace);
+			add_task_func(&atmost_statement_trace);
 			pass1_expr(tree_child_node(atmost_opt, 1), var_context, ostream);
-			pass1_statement(tree_child(atmost_opt, 2), &statement_trace, var_context, ostream);
+			pass1_statement(tree_child(atmost_opt, 2), &atmost_statement_trace, var_context, ostream);
 		}
 	}		
 	else if (tree_is(statement, "semi"))
@@ -4374,6 +4380,13 @@ void compile(result_p result, ostream_p ostream)
 				RESULT_INIT(&statement_trace);
 				pass1_statement(tree_child(tree_child_tree(tree_child_tree(decl, 2), 3), 1), &statement_trace, NULL, ostream);
 				RESULT_RELEASE(&statement_trace);
+				
+				for (task_func_p task_func = cur_task->task_funcs; task_func != 0; task_func = task_func->next)
+				{
+					printf("Task func %s : ", task_func->name);
+					result_print(&task_func->statement_trace, ostream);
+					printf("\n");
+				}
 			}
 			else
 			{
