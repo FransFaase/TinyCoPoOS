@@ -3409,7 +3409,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		} OPTN ADD_CHILD TREE("union","union %*{\n%*\n}")
 
 	NT_DEF("struct_declaration_or_anon")
-		RULE NT("struct_or_union_specifier") CHAR_WS(';') TREE("semi", "%*;")
+		RULE NT("struct_or_union_specifier") CHAR_WS(';') TREE_FROM_LIST("semi", "%*;")
 		RULE NTP("struct_declaration")
 
 	NT_DEF("struct_declaration")
@@ -3511,7 +3511,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 			RULE KEYWORD("default") TREE("default", "default")
 		} ADD_CHILD CHAR_WS(':') NT("statement") TREE("label","%*:")
 		RULE CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}') TREE_FROM_LIST("statements","%<{\n%>%*\n%<}%>")
-		RULE NT("expr") OPTN CHAR_WS(';') TREE("semi","%*;\n")
+		RULE NT("expr") OPTN CHAR_WS(';') TREE_FROM_LIST("semi","%*;\n")
 		RULE KEYWORD("if") WS CHAR_WS('(') NT("expr") CHAR_WS(')') NT("statement")
 		{ GROUPING
 			RULE KEYWORD("else") NT("statement") TREE("else","\nelse\n%>%*%<")
@@ -4141,6 +4141,7 @@ struct task_func
 {
 	const char *name;
 	result_t statement_trace;
+	tree_p task_call;
 	task_func_p next;
 };
 
@@ -4162,15 +4163,24 @@ int nr_tasks = 0;
 
 task_p cur_task = NULL;
 
-void add_task_func(result_p statement_trace)
+void add_task_func(result_p statement_trace, tree_p task_call)
 {
 	task_func_p task_func = MALLOC(struct task_func);
 	task_func->name = strprintf("%s_step%d", cur_task->name, ++cur_task->nr_funcs);
 	RESULT_INIT(&task_func->statement_trace);
+	task_func->task_call = task_call;
 	task_func->next = NULL;
 	result_assign(&task_func->statement_trace, statement_trace);
 	*cur_task->ref_next_task_func = task_func;
 	cur_task->ref_next_task_func = &task_func->next;
+}
+
+task_p find_task(const char *name)
+{
+	for (task_p task = tasks; task != NULL; task = task->next)
+		if (strcmp(task->name, name) == 0)
+			return task;
+	return NULL;
 }
 
 typedef struct var_context *var_context_p;
@@ -4221,8 +4231,24 @@ void pass1_expr(node_p node, var_context_p var_context, ostream_p ostream)
 	}
 }
 
+bool is_call_to_task(node_p node)
+{
+	if (node_is_tree(node, "call"))
+	{
+		node_p func_name = tree_child_node(CAST(tree_p, node), 1);
+		if (func_name->type_name == ident_node_type)
+		{
+			ident_node_p ident = CAST(ident_node_p, func_name);
+			return find_task(ident->name) != NULL;
+		}
+	}
+	return FALSE;
+}
+
 void pass1_statement(result_p result, result_p parent_statement_trace, var_context_p var_context, ostream_p ostream)
 {
+	ENTER_RESULT_CONTEXT
+	
 	tree_p statement = tree_of_result(result);
 	for (int i = 0; i < indent; i++)
 		printf("  ");
@@ -4232,8 +4258,7 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 		return;
 	}
 	indent++;
-	result_t statement_trace;
-	RESULT_INIT(&statement_trace);
+	DECL_RESULT(statement_trace);
 	make_result_list(&statement_trace, result, parent_statement_trace);
 	if (tree_is(statement, "list") || tree_is(statement, "statements"))
 	{
@@ -4252,7 +4277,8 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 				{
 					//printf("%d", j);
 					tree_p decl_init = tree_child_tree(decl, j);
-					pass1_expr(tree_child_node(decl_init, 2), var_context, ostream);
+					node_p init = tree_child_node(decl_init, 2);
+					pass1_expr(init, var_context, ostream);
 					node_p var_node = tree_child_node(decl_init, 1);
 					if (var_node->type_name == ident_node_type)
 					{
@@ -4278,6 +4304,13 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 						result_print(tree_child(decl_init, 1), ostream);
 						printf("\n");
 					}
+					if (is_call_to_task(init))
+					{
+						DECL_RESULT(child_trace);
+						make_result_list(&child_trace, tree_child(statement, i), &statement_trace);
+						add_task_func(&child_trace, CAST(tree_p, init));
+						DISP_RESULT(child_trace);
+					}
 				}
 				printf("\n");
 			}
@@ -4293,27 +4326,37 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 	}
 	else if (tree_is(statement, "queuefor"))
 	{
-		add_task_func(&statement_trace);
+		add_task_func(&statement_trace, NULL);
 		pass1_statement(tree_child(statement, 2), &statement_trace, var_context, ostream);
 	}
 	else if (tree_is(statement, "poll"))
 	{
-		add_task_func(&statement_trace);
+		add_task_func(&statement_trace, NULL);
 		pass1_statement(tree_child(statement, 1), &statement_trace, var_context, ostream);
 		tree_p atmost_opt = tree_child_tree(statement, 2);
 		if (atmost_opt != NULL)
 		{
-			result_t atmost_statement_trace;
-			RESULT_INIT(&atmost_statement_trace);
+			DECL_RESULT(atmost_statement_trace);
 			make_result_list(&atmost_statement_trace, tree_child(statement, 2), &statement_trace);
-			add_task_func(&atmost_statement_trace);
+			add_task_func(&atmost_statement_trace, NULL);
 			pass1_expr(tree_child_node(atmost_opt, 1), var_context, ostream);
 			pass1_statement(tree_child(atmost_opt, 2), &atmost_statement_trace, var_context, ostream);
+			DISP_RESULT(atmost_statement_trace);
+			
 		}
 	}		
 	else if (tree_is(statement, "semi"))
 	{
-		pass1_expr(tree_child_node(statement, 1), var_context, ostream);
+		for (int i = 1; i <= statement->nr_children; i++)
+			pass1_expr(tree_child_node(statement, i), var_context, ostream);
+		if (statement->nr_children == 1)
+		{
+			node_p node = tree_child_node(statement, 1);
+			if (   is_call_to_task(node)
+				|| (   node_is_tree(node, "assignment")
+					&& is_call_to_task(tree_child_node(CAST(tree_p, node), 3))))
+				add_task_func(&statement_trace, NULL);
+		}
 	}
 	else if (tree_is(statement, "ret"))
 	{
@@ -4325,7 +4368,7 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 		tree_print(statement, ostream);
 		printf("\n");
 	}
-	RESULT_RELEASE(&statement_trace);	
+	DISP_RESULT(statement_trace);	
 	indent--;
 }
 
@@ -4334,14 +4377,14 @@ void compile(result_p result, ostream_p ostream)
 {
 	//result_list_p tasks = NULL;
 	//result_list_p *ref_next_task = &tasks;
+	ENTER_RESULT_CONTEXT
 	
-	TREE_ITERATOR(decls, result);
-	for (int i = 0; i < decls.nr_children; i++)
+	TREE_ITERATOR(decls0, result);
+	for (int i = 0; i < decls0.nr_children; i++)
 	{
-		ITERATOR_TREE(decl, decls, i);
+		ITERATOR_TREE(decl, decls0, i);
 		if (tree_is(decl, "declaration"))
 		{
-			printf("\n");
 			tree_p types = tree_child_list(decl, 1);
 			bool is_task = types != 0 && tree_is(tree_child_tree(types, 1), "task");
 			if (is_task)
@@ -4376,17 +4419,33 @@ void compile(result_p result, ostream_p ostream)
 					*ref_new_global_var = new_result_list((tree_p)declaration);
 					ref_new_global_var = &(*ref_new_global_var)->next;
 				}
-				result_t statement_trace;
-				RESULT_INIT(&statement_trace);
+			}
+		}
+	}
+
+	cur_task = tasks;
+	TREE_ITERATOR(decls, result);
+	for (int i = 0; i < decls.nr_children; i++)
+	{
+		ITERATOR_TREE(decl, decls, i);
+		if (tree_is(decl, "declaration"))
+		{
+			printf("\n");
+			tree_p types = tree_child_list(decl, 1);
+			bool is_task = types != 0 && tree_is(tree_child_tree(types, 1), "task");
+			if (is_task)
+			{
+				DECL_RESULT(statement_trace);
 				pass1_statement(tree_child(tree_child_tree(tree_child_tree(decl, 2), 3), 1), &statement_trace, NULL, ostream);
-				RESULT_RELEASE(&statement_trace);
+				DISP_RESULT(statement_trace);
 				
 				for (task_func_p task_func = cur_task->task_funcs; task_func != 0; task_func = task_func->next)
 				{
-					printf("Task func %s : ", task_func->name);
+					printf("\nTask func %s : ", task_func->name);
 					result_print(&task_func->statement_trace, ostream);
 					printf("\n");
 				}
+				cur_task = cur_task->next;
 			}
 			else
 			{
@@ -4399,6 +4458,7 @@ void compile(result_p result, ostream_p ostream)
 		else
 			printf("other\n");
 	}
+	EXIT_RESULT_CONTEXT
 }
 
 int main(int argc, char *argv[])
@@ -4459,7 +4519,8 @@ int main(int argc, char *argv[])
 		print_expected(stdout);
 	}
 	DISP_RESULT(result);
-	
+
+	EXIT_RESULT_CONTEXT
 	solutions_free(&solutions);
 
 	return 0;
