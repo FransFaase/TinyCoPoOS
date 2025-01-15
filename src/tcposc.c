@@ -2076,6 +2076,23 @@ bool add_child(result_p prev, result_p elem, result_p result)
 	return TRUE;
 }
 
+void prepend_child(result_p children, result_p elem)
+{
+	prev_child_p prev_child = CAST(prev_child_p, children->data);
+	if (prev_child != NULL)
+		ref_counted_base_inc(prev_child);
+	prev_child_p new_prev_child = malloc_prev_child();
+	new_prev_child->prev = prev_child;
+	result_assign(&new_prev_child->child, elem);
+	ENTER_RESULT_CONTEXT
+	DECL_RESULT(new_children);
+	result_assign_ref_counted(&new_children, &new_prev_child->_base, prev_child_print);
+	SET_TYPE(prev_child_p, new_prev_child);
+	result_assign(children, &new_children);
+	DISP_RESULT(new_children);
+	EXIT_RESULT_CONTEXT
+}
+
 bool rec_add_child(result_p rec_result, result_p result)
 {
 	prev_child_p new_prev_child = malloc_prev_child();
@@ -3169,6 +3186,10 @@ TREE_PARAM(declaration, "%*%*")
 TREE_PARAM(list, "")
 TREE_PARAM(decl, "%*;\n")
 TREE_PARAM(decl_init, "%*%*")
+TREE_PARAM(semi, "%*;")
+TREE_PARAM(assignment, "%* %* %*")
+TREE_PARAM(ass, "=")
+TREE_PARAM(call, "%*(%*)")
 
 void c_grammar(non_terminal_dict_p *all_nt)
 {
@@ -3191,7 +3212,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 	NT_DEF("postfix_expr")
 		RULE NTP("primary_expr")
 		REC_RULEC CHAR_WS('[') NT("expr") CHAR_WS(']') TREE("arrayexp", "%*[%*]")
-		REC_RULEC CHAR_WS('(') NT("assignment_expr") SEQL(", ") { CHAIN CHAR_WS(',') } OPTN CHAR_WS(')') TREE("call","%*(%*)")
+		REC_RULEC CHAR_WS('(') NT("assignment_expr") SEQL(", ") { CHAIN CHAR_WS(',') } OPTN CHAR_WS(')') TREE_TP(call)
 		REC_RULEC CHAR_WS('.') IDENT TREE("field", "%*.%*")
 		REC_RULEC CHAR('-') CHAR_WS('>') IDENT TREE("fieldderef", "%*->%*")
 		REC_RULEC CHAR('+') CHAR_WS('+') TREE("post_inc", "%*++")
@@ -3280,11 +3301,11 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		RULE NTP("l_expr9")
 
 	NT_DEF("assignment_expr")
-		RULE NT("unary_expr") WS NT("assignment_operator") WS NT("assignment_expr") TREE("assignment", "%* %* %*")
+		RULE NT("unary_expr") WS NT("assignment_operator") WS NT("assignment_expr") TREE_TP(assignment)
 		RULE NTP("conditional_expr")
 
 	NT_DEF("assignment_operator")
-		RULE CHAR_WS('=') TREE("ass", "=")
+		RULE CHAR_WS('=') TREE_TP(ass)
 		RULE CHAR('*') CHAR_WS('=') TREE("times_ass", "*=")
 		RULE CHAR('/') CHAR_WS('=') TREE("div_ass", "/=")
 		RULE CHAR('%') CHAR_WS('=') TREE("mod_ass", "%%=")
@@ -3417,7 +3438,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 		} OPTN ADD_CHILD TREE("union","union %*{\n%*\n}")
 
 	NT_DEF("struct_declaration_or_anon")
-		RULE NT("struct_or_union_specifier") CHAR_WS(';') TREE_FROM_LIST("semi", "%*;")
+		RULE NT("struct_or_union_specifier") CHAR_WS(';') TREE_FROM_LIST_TP(semi)
 		RULE NTP("struct_declaration")
 
 	NT_DEF("struct_declaration")
@@ -3519,7 +3540,7 @@ void c_grammar(non_terminal_dict_p *all_nt)
 			RULE KEYWORD("default") TREE("default", "default")
 		} ADD_CHILD CHAR_WS(':') NT("statement") TREE("label","%*:")
 		RULE CHAR_WS('{') NT("decl_or_stat") CHAR_WS('}') TREE_FROM_LIST("statements","%<{\n%>%*\n%<}%>")
-		RULE NT("expr") OPTN CHAR_WS(';') TREE_FROM_LIST("semi","%*;\n")
+		RULE NT("expr") OPTN CHAR_WS(';') TREE_FROM_LIST_TP(semi)
 		RULE KEYWORD("if") WS CHAR_WS('(') NT("expr") CHAR_WS(')') NT("statement")
 		{ GROUPING
 			RULE KEYWORD("else") NT("statement") TREE("else","\nelse\n%>%*%<")
@@ -4144,6 +4165,14 @@ node_p make_ident_node(const char *name)
 	return &ident->_node;
 }
 
+node_p make_int_node(int value)
+{
+	int_node_p int_node = MALLOC(struct int_node_t);
+	init_node(&int_node->_node, int_node_type, NULL);
+	int_node->value = value;
+	return &int_node->_node;
+}
+
 typedef struct task_func *task_func_p;
 struct task_func
 {
@@ -4179,6 +4208,14 @@ void add_task_func(result_p statement_trace)
 	result_assign(&task_func->statement_trace, statement_trace);
 	*cur_task->ref_next_task_func = task_func;
 	cur_task->ref_next_task_func = &task_func->next;
+}
+
+task_func_p find_task_func(result_p statement)
+{
+	for (task_func_p task_func = cur_task->task_funcs; task_func != NULL; task_func = task_func->next)
+		if (CAST(result_list_p, task_func->statement_trace.data)->value.data == statement->data)
+			return task_func;
+	return NULL;
 }
 
 task_p find_task(const char *name)
@@ -4249,6 +4286,17 @@ bool is_call_to_task(node_p node)
 		}
 	}
 	return FALSE;
+}
+
+task_p task_with_call(node_p node)
+{
+	node_p func_name = tree_child_node(CAST(tree_p, node), 1);
+	if (func_name->type_name == ident_node_type)
+	{
+		ident_node_p ident = CAST(ident_node_p, func_name);
+		return find_task(ident->name);
+	}
+	return NULL;
 }
 
 void pass1_statement(result_p result, result_p parent_statement_trace, var_context_p var_context, ostream_p ostream)
@@ -4370,10 +4418,20 @@ void pass1_statement(result_p result, result_p parent_statement_trace, var_conte
 	indent--;
 }
 
-
-bool pass2_statement(result_p result, result_p result_out, ostream_p ostream)
+void prepend_child_node(result_p children, node_p node)
 {
 	ENTER_RESULT_CONTEXT
+	DECL_RESULT(child_result)
+	result_assign_ref_counted(&child_result, &node->_base, tree_print);
+	prepend_child(children, &child_result);
+	DISP_RESULT(child_result)
+	EXIT_RESULT_CONTEXT
+}
+
+
+void pass2_statement(result_p result, result_p children, ostream_p ostream)
+{
+	//ENTER_RESULT_CONTEXT
 	
 	tree_p statement = tree_of_result(result);
 	for (int i = 0; i < indent; i++)
@@ -4381,13 +4439,12 @@ bool pass2_statement(result_p result, result_p result_out, ostream_p ostream)
 	if (statement == NULL)
 	{
 		printf("pass2_statement: NULL\n");
-		return TRUE;
+		return;
 	}
 	indent++;
 	if (tree_is(statement, "list") || tree_is(statement, "statements"))
 	{
 		printf("statements / list\n");
-		DECL_RESULT(prev_child);
 		for (int i = 1; i <= statement->nr_children; i++)
 		{
 			tree_p child = tree_child_tree(statement, i);
@@ -4407,28 +4464,36 @@ bool pass2_statement(result_p result, result_p result_out, ostream_p ostream)
 				{
 					if (is_call_to_task(init))
 					{
+						task_p task_called = task_with_call(init);
+						task_func_p task_func = find_task_func(&statement->children[i]);
 						// Create call to task
-						
-						//DECL_RESULT(child_trace);
-						//make_result_list(&child_trace, tree_child(statement, i), &statement_trace);
-						//add_task_func(&child_trace, CAST(tree_p, init));
-						//DISP_RESULT(child_trace);
+						prepend_child_node(children,
+							make_tree_for(&semi_tp, 1,
+								make_tree_for(&call_tp, 2,
+									make_ident_node("os_call_task"),
+									make_tree_for(&list_tp, 3,
+										make_int_node(task_called->nr),
+										make_int_node(cur_task->nr),
+										make_ident_node(task_func->name)
+										))));
 					}
 					else
 					{
+						
 						// Create assignment from declaration
+						prepend_child_node(children,
+							make_tree_for(&semi_tp, 1,
+								make_tree_for(&assignment_tp, 3,
+									tree_child_node(decl_init, 1),
+									make_tree_for(&ass_tp, 0),
+									init)));
 					}
 				}
 				printf("\n");
 			}
 			else
 			{
-				DECL_RESULT(child_result);
-				if (pass2_statement(tree_child(statement, i), &child_result, ostream))
-				{
-					// Add child result
-				}
-				DISP_RESULT(child_result);
+				pass2_statement(tree_child(statement, i), children, ostream);
 			}
 		}
 	}
@@ -4488,7 +4553,6 @@ bool pass2_statement(result_p result, result_p result_out, ostream_p ostream)
 		//printf("\n");
 	}
 	indent--;
-	return TRUE;
 }
 
 
